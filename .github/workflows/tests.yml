@@ -1,0 +1,46 @@
+name: Unified installer and coexistence
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssl python3 curl iproute2 xz-utils
+      - name: Menu, preservation, passwords and failure handling
+        run: |
+          bash -n install.sh
+          python3 tests/test_installer.py
+      - name: Download verified installers and official cores
+        shell: bash
+        run: |
+          source ./install.sh
+          download_installer trojan "$RUNNER_TEMP/trojan-install.sh"
+          download_installer hysteria2 "$RUNNER_TEMP/hysteria-install.sh"
+          curl -fL --proto '=https' --tlsv1.2 --retry 2 --max-time 120 \
+            https://github.com/trojan-gfw/trojan/releases/download/v1.16.0/trojan-1.16.0-linux-amd64.tar.xz \
+            -o "$RUNNER_TEMP/trojan.tar.xz"
+          printf '%s  %s\n' daad1ab6edd3f89066c5e1f42c6618b2f8cb59b7ba375dfb043d0c62c9e254ea "$RUNNER_TEMP/trojan.tar.xz" | sha256sum -c -
+          tar --no-same-owner -xJf "$RUNNER_TEMP/trojan.tar.xz" -C "$RUNNER_TEMP"
+          curl -fL --proto '=https' --tlsv1.2 --retry 2 --max-time 120 \
+            https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hysteria-linux-amd64 \
+            -o "$RUNNER_TEMP/hysteria"
+          printf '%s  %s\n' 907ba8c9693edb104b20582681fb7dc15639d5b64a9cbb616a7b539190a86691 "$RUNNER_TEMP/hysteria" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/hysteria"
+      - name: Real TCP and UDP 443, custom ports, both orders, renewal and locks
+        run: |
+          sudo env \
+            TROJAN_BIN="$RUNNER_TEMP/trojan/trojan" \
+            HYSTERIA_BIN="$RUNNER_TEMP/hysteria" \
+            TROJAN_INSTALLER="$RUNNER_TEMP/trojan-install.sh" \
+            HYSTERIA_INSTALLER="$RUNNER_TEMP/hysteria-install.sh" \
+            python3 tests/test_coexist.py
