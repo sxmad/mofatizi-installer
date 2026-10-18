@@ -76,6 +76,28 @@ CHILD
                 self.assertIn(f'run {missing}', self.events_text())
                 self.assertEqual(self.configs[existing].read_text(), 'existing-domain/password/port')
 
+    def test_webroot_default_and_override_are_passed_to_children(self):
+        common = self.root / 'website'
+        hy2 = self.root / 'second site'
+        common.mkdir()
+        hy2.mkdir()
+        self.run_script(self.args + ['--acme-webroot', str(common), '--hysteria2-acme-webroot', str(hy2)])
+        lines = self.events_text().splitlines()
+        self.assertIn('--acme-webroot ' + str(common), next(x for x in lines if x.startswith('run trojan')))
+        self.assertIn('--acme-webroot ' + str(hy2), next(x for x in lines if x.startswith('run hysteria2')))
+
+    def test_recover_only_failed_hy2_preserves_existing_trojan(self):
+        self.configs['trojan'].write_text('legacy-config')
+        self.configs['hysteria2'].write_text('official-sample-after-failure')
+        r = self.run_script(['hysteria2'])
+        self.assertIn('--reinstall', r.stdout)
+        self.assertEqual(self.events_text(), '')
+        self.run_script(['hysteria2', '--domain', 'hy2.example.com', '--email', 'admin@example.com',
+                         '--port', '8443', '--reinstall', '--yes'])
+        self.assertIn('run hysteria2', self.events_text())
+        self.assertNotIn('run trojan', self.events_text())
+        self.assertEqual(self.configs['trojan'].read_text(), 'legacy-config')
+
     def test_yes_alone_does_not_replace_existing_and_no_identity_needed_when_all_installed(self):
         for path in self.configs.values(): path.write_text('keep')
         self.run_script(['all', '--yes'])
@@ -118,6 +140,7 @@ CHILD
     def test_invalid_parameters_stop_before_any_download(self):
         for extra in [['--port', '8443'], ['--password-stdin'], ['--trojan-port', '80'], ['--hysteria2-port', '0'],
                       ['--hysteria2-https-port', '443'], ['--hysteria2-https-port', '80'], ['--unknown'],
+                      ['--acme-webroot', 'relative/path'], ['--acme-webroot', str(self.root / 'absent')],
                       ['--trojan-domain', 'bad;domain'], ['--hysteria2-version', 'v1.0.0']]:
             with self.subTest(extra=extra):
                 self.run_script(self.args + extra, ok=False)
@@ -130,6 +153,7 @@ CHILD
     def test_partial_failure_returns_nonzero_and_retains_first_service(self):
         r = self.run_script(ok=False, FAIL_CHILD='hysteria2')
         self.assertIn('Completed: trojan', r.stderr)
+        self.assertIn('retry only hysteria2 with --reinstall', r.stderr)
         self.assertEqual(self.events_text().count('run trojan'), 1)
         self.assertNotIn('uninstall', self.events_text())
 

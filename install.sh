@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
-readonly SCRIPT_VERSION="2026-10-18.1"
+readonly SCRIPT_VERSION="2026-10-18.2"
 # Add a real installer adapter here to extend the numbered menu.
 readonly -a PROTOCOLS=(trojan hysteria2)
 declare -Ar REPOSITORIES=([trojan]=trojan-installer [hysteria2]=hysteria2-installer)
-declare -Ar REVISIONS=([trojan]=4ee3336406f7e00b48ab5c06b12a3db3a7315ae9 [hysteria2]=12d4cfe1943b9b405a5cd92fad1dd9705eac4f9e)
-declare -Ar CHECKSUMS=([trojan]=48f9625372dee94b90ef157ce3116f67b1ec3c65b444b0b3a5f8c94507fb6914 [hysteria2]=aefcd525e6ae5b243b7de641ea0158f1a4740f37ade1e3fcf8ee43adf9332c5d)
+declare -Ar REVISIONS=([trojan]=7935954c7500ef6920cc8d6863256a16995b5b83 [hysteria2]=9fc16c5fe6ae5a13e2b04f39217246354545e373)
+declare -Ar CHECKSUMS=([trojan]=fa2bf60a4320296a70183657ae0e3df77d1c6568d88cb01b7062d74c12aeb100 [hysteria2]=6d81b43f48dfc52d884e0a88893ebf9ad17c2674318a7e042afb94f45792df01)
 declare -Ar CONFIGS=([trojan]=/etc/trojan/server.json [hysteria2]=/etc/hysteria/config.yaml)
 TARGET=""
 DOMAIN=""
 EMAIL=""
+ACME_WEBROOT=""
 SINGLE_PORT=""
 SINGLE_PASSWORD_FILE=""
 PASSWORD_STDIN=0
@@ -23,6 +24,7 @@ HTTPS_PORT=0
 WORK_DIR=""
 STDIN_PASSWORD=""
 declare -A DOMAINS=([trojan]="" [hysteria2]="")
+declare -A WEBROOTS=([trojan]="" [hysteria2]="")
 declare -A PORTS=([trojan]=443 [hysteria2]=443)
 declare -A VERSIONS=([trojan]=latest [hysteria2]="")
 declare -A PASSWORD_FILES=([trojan]="" [hysteria2]="")
@@ -41,6 +43,8 @@ No selection: show 1) all, 2) trojan, 3) hysteria2.
   --trojan-domain DOMAIN      Override Trojan domain
   --hysteria2-domain DOMAIN   Override Hysteria domain
   --email EMAIL               Certificate account email
+  --acme-webroot DIR         Existing HTTP website root for selected protocols
+  --trojan-acme-webroot DIR / --hysteria2-acme-webroot DIR  Override per protocol
   --port PORT                 Port for a single selected protocol
   --trojan-port PORT          TCP port, default 443
   --hysteria2-port PORT       UDP port, default 443
@@ -81,7 +85,7 @@ parse_args() {
       --no-bbr) NO_BBR=1; shift; continue ;;
       --no-masquerade) NO_MASQUERADE=1; shift; continue ;;
       --help|-h) usage; exit 0 ;;
-      --protocol|--domain|--email|--port|--password-file|--trojan-domain|--hysteria2-domain|--trojan-port|--hysteria2-port|--hysteria2-https-port|--trojan-password-file|--hysteria2-password-file|--trojan-version|--hysteria2-version)
+      --protocol|--domain|--email|--acme-webroot|--trojan-acme-webroot|--hysteria2-acme-webroot|--port|--password-file|--trojan-domain|--hysteria2-domain|--trojan-port|--hysteria2-port|--hysteria2-https-port|--trojan-password-file|--hysteria2-password-file|--trojan-version|--hysteria2-version)
         (($# >= 2)) || die "Missing value for $key"
         value="$2"
         [[ -n "$value" ]] || die "Empty value for $key"
@@ -92,6 +96,9 @@ parse_args() {
       --protocol) set_target "$value" ;;
       --domain) DOMAIN="${value,,}" ;;
       --email) EMAIL="$value" ;;
+      --acme-webroot) ACME_WEBROOT="$value" ;;
+      --trojan-acme-webroot) WEBROOTS[trojan]="$value" ;;
+      --hysteria2-acme-webroot) WEBROOTS[hysteria2]="$value" ;;
       --port) SINGLE_PORT="$value" ;;
       --password-file) SINGLE_PASSWORD_FILE="$value" ;;
       --trojan-domain) DOMAINS[trojan]="${value,,}" ;;
@@ -170,9 +177,14 @@ prepare_plan() {
   for protocol in "${SELECTED[@]}"; do
     if [[ -e "${CONFIGS[$protocol]}" ]] && (( ! REINSTALL )); then
       info "SKIP $protocol: existing configuration preserved (${CONFIGS[$protocol]})."
+      info "Configuration presence is not a health check. After a failed install, fix the cause and retry only $protocol with --reinstall and the intended credentials."
       continue
     fi
     PENDING+=("$protocol")
+    [[ -n "${WEBROOTS[$protocol]}" ]] || WEBROOTS[$protocol]="$ACME_WEBROOT"
+    if [[ -n "${WEBROOTS[$protocol]}" ]]; then
+      [[ "${WEBROOTS[$protocol]}" == /* && -d "${WEBROOTS[$protocol]}" && "${WEBROOTS[$protocol]}" != *$'\n'* && "${WEBROOTS[$protocol]}" != *$'\r'* ]] || die "ACME webroot must be an existing absolute directory."
+    fi
     port="${PORTS[$protocol]}"
     validate_port "$port" || die "Invalid $protocol port."
     PORTS[$protocol]=$((10#$port))
@@ -222,6 +234,7 @@ download_installer() {
 run_installer() {
   local protocol="$1" script="$2" password=""
   local -a args=(install --domain "${DOMAINS[$protocol]}" --email "$EMAIL" --port "${PORTS[$protocol]}")
+  [[ -z "${WEBROOTS[$protocol]}" ]] || args+=(--acme-webroot "${WEBROOTS[$protocol]}")
   [[ -z "${VERSIONS[$protocol]}" ]] || args+=(--version "${VERSIONS[$protocol]}")
   if [[ "$protocol" == trojan ]]; then
     (( ! NO_BBR )) || args+=(--no-bbr)
@@ -248,6 +261,7 @@ main() {
   local protocol completed=""
   for protocol in "${PENDING[@]}"; do
     info "INSTALL $protocol: domain=${DOMAINS[$protocol]} port=${PORTS[$protocol]}"
+    [[ -z "${WEBROOTS[$protocol]}" ]] || info "  HTTP-01 webroot: ${WEBROOTS[$protocol]} (also used for renewal)"
   done
   if ((DRY_RUN)) || ((${#PENDING[@]} == 0)); then return 0; fi
   [[ "$EUID" == 0 ]] || die "Run with sudo or as root."
@@ -262,7 +276,7 @@ main() {
     if run_installer "$protocol" "$WORK_DIR/$protocol.sh"; then
       completed+=" $protocol"
     else
-      die "Failed: $protocol. Completed:${completed:- none}. Existing/other successful services are retained; fix the reported error before retrying."
+      die "Failed: $protocol. Completed:${completed:- none}. Existing/other successful services are retained; fix the reported error before retrying. A failed child may leave a config: retry only $protocol with --reinstall and the intended domain, port and password; do not reinstall all to recover one protocol."
     fi
   done
   info "Installation completed:${completed}. Verify public connectivity in Shadowrocket."

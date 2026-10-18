@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Trojan / Hysteria 2 统一入口，修订号 **2026-10-18.1**。支持菜单或参数安装；默认文档与页面元信息使用英文。
+Trojan / Hysteria 2 统一入口，修订号 **2026-10-18.2**。支持菜单或参数安装；默认文档与页面元信息使用英文。
 
 ## 菜单
 
@@ -145,3 +145,32 @@ sudo env \
 ```
 
 在一次性测试环境执行真实核心测试。CI 覆盖菜单、参数、保留任一已有协议、密码传递、下载校验和部分失败；真实测试覆盖两种启动顺序、TCP/UDP 443 同号、443/8443 组合、自定义端口、HY2 不重启换证，以及证书操作串行执行。使用本地 CA 和回环目标，不代替公网 ACME、GCP 防火墙、Shadowrocket 或多天运行测试。
+
+## TCP 80 已有网站时
+
+旧版 Trojan 安装方案可能包含长期占用 TCP 80 的 Nginx/Apache。HY2 的 UDP 8443 可以和 Trojan 共存，但默认的独立 HTTP-01 验证程序无法同时监听 TCP 80。改变代理端口不能解决此问题，也无需停止旧服务。
+
+先执行 `sudo ss -ltnp 'sport = :80'` 确认进程。如果是 Nginx，再查看 `sudo nginx -T` 中实际加载的 HTTP 站点和目录。给 HY2 的**新域名**配置 HTTP 验证路径，让 `http://hy2.example.com/.well-known/acme-challenge/TOKEN` 读取 `/实际目录/.well-known/acme-challenge/TOKEN`。目录存在并不代表新域名会指向它；需要检查虚拟主机、重定向、访问权限及公网 TCP 80。不要假定网站一定在 `/var/www/html`。
+
+可参考[英文页的 Nginx 配置示例](README.md#existing-http-server-on-port-80)，它为独立新域名增加验证站点，保留旧 Trojan 站点。已有该域名的站点时应修改其验证 location，不能重复添加同名 server。配置检查 `nginx -t` 通过后仅 reload，不停止旧服务；先用临时文本文件验证 HTTP 200 和内容正确，再申请证书。
+
+两个单独安装器及统一入口均支持 `--acme-webroot DIR`。统一入口还支持 `--trojan-acme-webroot DIR` / `--hysteria2-acme-webroot DIR` 分别覆盖公共目录。签发与以后自动续期都会使用指定目录；安装后须保留该目录、网站路由和公网 TCP 80。
+
+以下假设已正确配置 `/var/www/acme`，这是示例路径，不是自动探测结果：
+
+```bash
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+  https://raw.githubusercontent.com/sxmad/mofatizi-installer/main/install.sh) hysteria2 \
+  --domain hy2.example.com \
+  --email you@example.com \
+  --port 8443 \
+  --acme-webroot /var/www/acme'
+```
+
+### 上一次安装失败后重试
+
+官方 HY2 程序安装器显示成功，只代表核心和服务文件已放置，不代表证书和代理连接已可用。旧版本在证书失败前可能已经生成默认 `/etc/hysteria/config.yaml`。统一入口发现它会显示 `SKIP`，不等于 HY2 安装成功。
+
+修复验证路径后，在上述命令增加 **`--reinstall`，仅选择 `hysteria2`**。确认备份覆盖失败的 HY2 配置；明确选择该协议后，也可增加 `--yes` 跳过覆盖确认。已有 Trojan 不受影响。如果 HY2 原来已有可用客户端，还应传入原密码，否则会生成新密码。不要用 `all --reinstall` 处理单个 HY2 失败。
+
+新版本已将 TCP 80 占用检查提前到调用官方 HY2 安装器之前；后续网络或 CA 失败仍可能留下安装文件，因此不会自动覆盖所有已有配置。未指定 webroot 时仍使用独立 TCP 80 临时监听，当前不提供 DNS-01。
