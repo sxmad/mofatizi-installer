@@ -1,0 +1,1 @@
+# mofatizi-installer
